@@ -1,0 +1,341 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Complex infrastructure with VPC, EC2, RDS, and ALB'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name
+  
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: VPC CIDR block
+  
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    Description: EC2 instance type
+  
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Description: Database password
+
+Mappings:
+  RegionAMI:
+    us-east-1:
+      AMI: ami-0c55b159cbfafe1f0
+    us-west-2:
+      AMI: ami-0d1cd67c26f5fca19
+
+Conditions:
+  IsProduction: !Equals [!Ref Environment, prod]
+  CreateMultiAZ: !Equals [!Ref Environment, prod]
+
+Resources:
+  # VPC and Networking
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-vpc'
+        - Key: Environment
+          Value: !Ref Environment
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-igw'
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 4, 8]]
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-1'
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [1, !Cidr [!Ref VpcCidr, 4, 8]]
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-2'
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [2, !Cidr [!Ref VpcCidr, 4, 8]]
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-private-1'
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [3, !Cidr [!Ref VpcCidr, 4, 8]]
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-private-2'
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-rt'
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssoc1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  SubnetRouteTableAssoc2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # Security Groups
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${AWS::StackName}-alb-sg'
+      GroupDescription: Security group for ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-alb-sg'
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${AWS::StackName}-ec2-sg'
+      GroupDescription: Security group for EC2 instances
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-ec2-sg'
+
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${AWS::StackName}-db-sg'
+      GroupDescription: Security group for RDS
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref EC2SecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-db-sg'
+
+  # IAM Role for EC2
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-ec2-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub '${AWS::StackName}-ec2-profile'
+      Roles:
+        - !Ref EC2Role
+
+  # Application Load Balancer
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${AWS::StackName}-alb'
+      Type: application
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-alb'
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${AWS::StackName}-tg'
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      HealthCheckEnabled: true
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      TargetType: instance
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+
+  # EC2 Launch Template
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub '${AWS::StackName}-lt'
+      LaunchTemplateData:
+        ImageId: !FindInMap [RegionAMI, !Ref 'AWS::Region', AMI]
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt EC2InstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref EC2SecurityGroup
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            yum update -y
+            yum install -y httpd
+            systemctl start httpd
+            systemctl enable httpd
+            echo "Hello from ${AWS::StackName}" > /var/www/html/index.html
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub '${AWS::StackName}-instance'
+              - Key: Environment
+                Value: !Ref Environment
+
+  # RDS Subnet Group
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub '${AWS::StackName}-db-subnet-group'
+      DBSubnetGroupDescription: Subnet group for RDS
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-db-subnet-group'
+
+  # RDS Instance
+  Database:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub '${AWS::StackName}-db'
+      Engine: mysql
+      EngineVersion: '8.4.4'
+      DBInstanceClass: db.t3.micro
+      AllocatedStorage: 20
+      StorageType: gp3
+      StorageEncrypted: true
+      MasterUsername: admin
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DBSecurityGroup
+      MultiAZ: !If [CreateMultiAZ, true, false]
+      BackupRetentionPeriod: !If [IsProduction, 7, 1]
+      PreferredBackupWindow: 03:00-04:00
+      PreferredMaintenanceWindow: sun:04:00-sun:05:00
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-db'
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  VPCId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${AWS::StackName}-vpc-id'
+
+  LoadBalancerDNS:
+    Description: DNS name of the load balancer
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub '${AWS::StackName}-alb-dns'
+
+  DatabaseEndpoint:
+    Description: RDS endpoint
+    Value: !GetAtt Database.Endpoint.Address
+    Export:
+      Name: !Sub '${AWS::StackName}-db-endpoint'
+
+  EC2SecurityGroupId:
+    Description: EC2 Security Group ID
+    Value: !Ref EC2SecurityGroup
