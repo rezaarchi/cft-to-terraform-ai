@@ -83,7 +83,6 @@ Monitor the pipeline in AWS Console → CodePipeline.
 ├── pipeline-bedrock.yaml           # CloudFormation stack for pipeline
 ├── bedrock-ai-converter.py         # AI conversion script
 ├── deploy-pipeline.sh              # One-command deployment script
-├── architecture-diagram.drawio     # Pipeline architecture diagram
 └── README.md                       # This file
 ```
 
